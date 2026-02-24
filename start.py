@@ -82,8 +82,8 @@ def setup_nmpc(model, dt, N):
     ocp.dims.N = N
     ocp.solver_options.tf = N * dt
 
-    Q = np.diag([100, 100, 100,
-                 5, 5, 5,
+    Q = np.diag([200, 200, 200,
+                 20, 20, 20,
                  10, 10, 10,
                  1, 1, 1])
     R = np.diag([0.1, 0.1, 0.1, 0.1])
@@ -103,7 +103,7 @@ def setup_nmpc(model, dt, N):
     ocp.cost.yref_e = np.zeros(nx)
 
     # Control Input Constraints
-    max_thrust = 20.0
+    max_thrust = 30.0
     max_moment = 2.0
     ocp.constraints.idxbu = np.array([0, 1, 2, 3])
     ocp.constraints.lbu = np.array([0.0, -max_moment, -max_moment, -max_moment])
@@ -148,55 +148,72 @@ if __name__ == "__main__":
     m = 1.2577
     g = 9.81
     hover_thrust = m * g
-    radius = 2.0
-    freq = 0.1
-    final_alt = -5.0
+
+    # -------------------------------------------------------------
+    # CAR TRAJECTORY SETUP (from main.py logic)
+    # -------------------------------------------------------------
+    SPEED_MPS = 0.5
+    DISTANCE_Y = 0.5* t_end  # 10 meters over 20 seconds
+
+    t_full = np.linspace(0, t_end, N_sim)
+    car_y_full = 0.5 * t_full
+    car_x_full = 2 * np.sin(2 * car_y_full)
+    car_z_full = np.zeros_like(car_y_full)
+
+    # Drone tracks the car's X and Y, but maintains an altitude of -2.0m (above the car)
+    z_ref_full = np.full_like(car_y_full, -0.5)
+    psi_ref_full = np.zeros_like(car_y_full)
 
     x_current = np.zeros(12)
-    x_current[0:3] = [5.0, 5.0, -4.0]  # Initialize X, Y, Z
+    x_current[0:3] = [-10.0, -10.0, -8.0]  # Initialize drone X, Y, Z
 
     f_fun = ca.Function("f", [model.x, model.u], [model.f_expl_expr])
 
-    t_full = np.linspace(0, t_end, N_sim)
-    x_ref_full = radius * np.cos(2 * np.pi * freq * t_full)
-    y_ref_full = radius * np.sin(2 * np.pi * freq * t_full)
-    z_ref_full = final_alt * t_full / t_end
-    psi_ref_full = 2 * np.pi * freq * t_full
-
+    # Plot Setup
     plt.ion()
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
     ax.set_xlim(-3, 6)
-    ax.set_ylim(-3, 6)
-    ax.set_zlim(-2, 8)
+    ax.set_ylim(-3, DISTANCE_Y + 1)
+    ax.set_zlim(-1, 5)  # Z is inverted in plotting logic
 
-    ax.plot(x_ref_full, y_ref_full, -z_ref_full, 'k--', linewidth=1.5)
-    line_traj, = ax.plot([], [], [], 'b', linewidth=2.5)
-    arm1, = ax.plot([], [], [], 'r', linewidth=3)
-    arm2, = ax.plot([], [], [], 'r', linewidth=3)
+    # Plot faint path of the car
+    ax.plot(car_x_full, car_y_full, car_z_full, color='gray', linestyle='--', alpha=0.4, label='Car Trajectory')
+
+    # Init drawing elements
+    line_traj, = ax.plot([], [], [], 'b', linewidth=2.5, label='Drone Flight Path')
+    arm1, = ax.plot([], [], [], 'g', linewidth=3)
+    arm2, = ax.plot([], [], [], 'g', linewidth=3)
     motor_pts = [ax.plot([], [], [], 'ko', markersize=6)[0] for _ in range(4)]
+
+    # Init Car from main.py
+    car_plot, = ax.plot([], [], [], color='red', linewidth=3, label='0.5x0.5m Car')
+    ax.legend()
 
     trajectory = []
     u_history = []
     arm_length = 0.25
 
+    # Simulation loop
     for i in range(N_sim):
-        for j in range(N):
-            t_ref = (i + j) * dt
-            xr = radius * np.cos(2 * np.pi * freq * t_ref)
-            yr = radius * np.sin(2 * np.pi * freq * t_ref)
-            zr = final_alt * t_ref / t_end
-            psir = 2 * np.pi * freq * t_ref
 
+        # Current car position
+        curr_car_x = car_x_full[i]
+        curr_car_y = car_y_full[i]
+        curr_drone_z_target = z_ref_full[i]
+
+        # The drone ONLY knows the CURRENT position of the car.
+        # It uses this exact position across the entire prediction horizon.
+        for j in range(N):
             yref = np.zeros(16)
-            yref[0:3] = [xr, yr, zr]
-            yref[8] = psir
+            yref[0:3] = [curr_car_x, curr_car_y, curr_drone_z_target]
+            yref[8] = 0.0  # Optional heading (yaw) target
             yref[12] = hover_thrust
             solver.set(j, "yref", yref)
 
         yref_e = np.zeros(12)
-        yref_e[0:3] = [xr, yr, zr]
-        yref_e[8] = psir
+        yref_e[0:3] = [curr_car_x, curr_car_y, curr_drone_z_target]
+        yref_e[8] = 0.0
         solver.set(N, "y_ref", yref_e)
 
         solver.set(0, "lbx", x_current)
@@ -206,7 +223,7 @@ if __name__ == "__main__":
         u0 = solver.get(0, "u")
         u_history.append(u0)
 
-        # RK4 Integration
+        # RK4 Integration for the drone
         k1 = np.array(f_fun(x_current, u0)).flatten()
         k2 = np.array(f_fun(x_current + dt / 2 * k1, u0)).flatten()
         k3 = np.array(f_fun(x_current + dt / 2 * k2, u0)).flatten()
@@ -216,6 +233,9 @@ if __name__ == "__main__":
         trajectory.append(x_current.copy())
         traj = np.array(trajectory)
 
+        # -------------------------------------------------------------
+        # DRAW DRONE
+        # -------------------------------------------------------------
         line_traj.set_data(traj[:, 0], traj[:, 1])
         line_traj.set_3d_properties(-traj[:, 2])
 
@@ -249,13 +269,41 @@ if __name__ == "__main__":
                                 [-arm_length, 0, 0],
                                 [0, arm_length, 0],
                                 [0, -arm_length, 0]]).T
-
         motors_world = R @ motors_body
 
         for k in range(4):
             motor_pts[k].set_data([X + motors_world[0, k]],
                                   [Y + motors_world[1, k]])
             motor_pts[k].set_3d_properties([-(Z + motors_world[2, k])])
+
+        # -------------------------------------------------------------
+        # DRAW CAR (using rotation logic from main.py)
+        # -------------------------------------------------------------
+        if i < len(car_x_full) - 1:
+            dx_car = car_x_full[i + 1] - car_x_full[i]
+            dy_car = car_y_full[i + 1] - car_y_full[i]
+        else:
+            dx_car = car_x_full[i] - car_x_full[i - 1]
+            dy_car = car_y_full[i] - car_y_full[i - 1]
+
+        car_theta = np.arctan2(dy_car, dx_car)
+        car_alpha = car_theta - (np.pi / 2)
+
+        h = 0.25
+        nose = 0.40
+        x_local = np.array([-h, h, h, 0, -h, -h])
+        y_local = np.array([-h, -h, h, nose, h, -h])
+
+        c_car, s_car = np.cos(car_alpha), np.sin(car_alpha)
+        x_rotated = x_local * c_car - y_local * s_car
+        y_rotated = x_local * s_car + y_local * c_car
+
+        plat_x = x_rotated + curr_car_x
+        plat_y = y_rotated + curr_car_y
+        plat_z = np.full_like(plat_x, 0.0)
+
+        car_plot.set_data(plat_x, plat_y)
+        car_plot.set_3d_properties(plat_z)
 
         plt.draw()
         plt.pause(dt)
@@ -269,15 +317,16 @@ if __name__ == "__main__":
     traj = np.array(trajectory)
     u_history = np.array(u_history)
 
-    ex = traj[:, 0] - x_ref_full[:len(traj)]
-    ey = traj[:, 1] - y_ref_full[:len(traj)]
+    # Calculate errors based on how well the drone tracked the car's position
+    ex = traj[:, 0] - car_x_full[:len(traj)]
+    ey = traj[:, 1] - car_y_full[:len(traj)]
     ez = traj[:, 2] - z_ref_full[:len(traj)]
     epsi = traj[:, 8] - psi_ref_full[:len(traj)]
 
     rms_pos = np.sqrt(np.mean(ex ** 2 + ey ** 2 + ez ** 2))
     rms_yaw = np.sqrt(np.mean(epsi ** 2))
 
-    print("RMS Position Error:", rms_pos)
+    print("RMS Position Error (Tracking Car):", rms_pos)
     print("RMS Yaw Error:", rms_yaw)
 
     plt.figure()
@@ -285,7 +334,7 @@ if __name__ == "__main__":
     plt.plot(t_full[:len(traj)], ey, label="Y error")
     plt.plot(t_full[:len(traj)], ez, label="Z error")
     plt.legend()
-    plt.title("Position Tracking Errors")
+    plt.title("Position Tracking Errors (Pursuing Car)")
     plt.grid()
 
     plt.figure()
