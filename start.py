@@ -7,7 +7,37 @@ from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 
 
 # =============================================================================
-# 1. QUADROTOR MODEL
+# NEW: HELIX TRAJECTORY GENERATOR
+# =============================================================================
+def helix_with_sine_z(
+        n_points: int = 4000,
+        radius: float = 1.5,
+        pitch: float = 1.0,
+        turns: float = 4.0,
+        z_wave_amp: float = 0.25,
+        z_wave_cycles: float = 20.0,
+        start_xyz=(0.0, 0.0, 0.0),
+        start_phase: float = 0.0
+):
+    x0, y0, z0 = map(float, start_xyz)
+
+    t_end = 2.0 * np.pi * turns
+    t = np.linspace(0.0, t_end, n_points)
+    th = start_phase + t
+
+    x = x0 + radius * np.cos(th)
+    y = y0 + radius * np.sin(th)
+
+    z_base = -(pitch / (2.0 * np.pi)) * t
+    z_wave = z_wave_amp * np.sin(2.0 * np.pi * z_wave_cycles * (t / t_end))
+    z = z0 + z_base + z_wave
+
+    pts = np.column_stack([x, y, z])
+    return pts
+
+
+# =============================================================================
+# 1. QUADROTOR MODEL (Unchanged)
 # =============================================================================
 def create_quadrotor_model():
     model = AcadosModel()
@@ -70,7 +100,7 @@ def create_quadrotor_model():
 
 
 # =============================================================================
-# 2. NMPC SETUP
+# 2. NMPC SETUP (Unchanged)
 # =============================================================================
 def setup_nmpc(model, dt, N):
     ocp = AcadosOcp()
@@ -102,27 +132,22 @@ def setup_nmpc(model, dt, N):
     ocp.cost.yref = np.zeros(nx + nu)
     ocp.cost.yref_e = np.zeros(nx)
 
-    # Control Input Constraints
-    max_thrust = 30.0
-    max_moment = 2.0
+    max_thrust = 76.7636
+    max_moment_x = 4.22
+    max_moment_z = 0.6
     ocp.constraints.idxbu = np.array([0, 1, 2, 3])
-    ocp.constraints.lbu = np.array([0.0, -max_moment, -max_moment, -max_moment])
-    ocp.constraints.ubu = np.array([max_thrust, max_moment, max_moment, max_moment])
+    ocp.constraints.lbu = np.array([0.0, -max_moment_x, -max_moment_x, -max_moment_z])
+    ocp.constraints.ubu = np.array([max_thrust, max_moment_x, max_moment_x, max_moment_z])
 
-    # State Constraints: Roll (idx 6) and Pitch (idx 7) limited to 45 degrees
-    max_angle = np.pi / 4.0
-
-    # Intermediate nodes constraints
+    max_angle = np.pi / 3.0
     ocp.constraints.idxbx = np.array([6, 7])
     ocp.constraints.lbx = np.array([-max_angle, -max_angle])
     ocp.constraints.ubx = np.array([max_angle, max_angle])
 
-    # Terminal node constraints
     ocp.constraints.idxbx_e = np.array([6, 7])
     ocp.constraints.lbx_e = np.array([-max_angle, -max_angle])
     ocp.constraints.ubx_e = np.array([max_angle, max_angle])
 
-    # Initial state constraint setup
     ocp.constraints.x0 = np.zeros(nx)
 
     ocp.solver_options.qp_solver = 'PARTIAL_CONDENSING_HPIPM'
@@ -134,7 +159,7 @@ def setup_nmpc(model, dt, N):
 
 
 # =============================================================================
-# 3. SIMULATION + VISUALIZATION + PERFORMANCE ANALYSIS
+# 3. SIMULATION + VISUALIZATION
 # =============================================================================
 if __name__ == "__main__":
     dt = 0.02
@@ -147,25 +172,34 @@ if __name__ == "__main__":
 
     m = 1.2577
     g = 9.81
-    hover_thrust = m * g
+    hover_thrust = 12.33
 
     # -------------------------------------------------------------
-    # CAR TRAJECTORY SETUP (from main.py logic)
+    # HELIX TARGET TRAJECTORY SETUP
     # -------------------------------------------------------------
-    SPEED_MPS = 0.5
-    DISTANCE_Y = 0.5* t_end  # 10 meters over 20 seconds
+    pts = helix_with_sine_z(
+        n_points=N_sim,
+        radius=1.5,
+        pitch=1.0,
+        turns=4.0,
+        z_wave_amp=0.25,
+        z_wave_cycles=20.0,
+        start_xyz=(2.0, -1.0, -0.5),
+        start_phase=np.deg2rad(30)
+    )
 
+    target_x_full = pts[:, 0]
+    target_y_full = pts[:, 1]
+    target_z_full = pts[:, 2]
+
+    # Drone tracks the target's X, Y, and Z
+    z_ref_full = target_z_full
+    psi_ref_full = np.zeros_like(target_x_full)
     t_full = np.linspace(0, t_end, N_sim)
-    car_y_full = 0.5 * t_full
-    car_x_full = 2 * np.sin(2 * car_y_full)
-    car_z_full = np.zeros_like(car_y_full)
 
-    # Drone tracks the car's X and Y, but maintains an altitude of -2.0m (above the car)
-    z_ref_full = np.full_like(car_y_full, -0.5)
-    psi_ref_full = np.zeros_like(car_y_full)
-
+    # Initialize drone slightly offset from the start of the helix
     x_current = np.zeros(12)
-    x_current[0:3] = [-10.0, -10.0, -8.0]  # Initialize drone X, Y, Z
+    x_current[0:3] = [0.0, 0.0, -0.0]
 
     f_fun = ca.Function("f", [model.x, model.u], [model.f_expl_expr])
 
@@ -173,21 +207,21 @@ if __name__ == "__main__":
     plt.ion()
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
-    ax.set_xlim(-3, 6)
-    ax.set_ylim(-3, DISTANCE_Y + 1)
-    ax.set_zlim(-1, 5)  # Z is inverted in plotting logic
+    ax.set_xlim(-1, 5)
+    ax.set_ylim(-3, 3)
+    ax.set_zlim(-1, 6)  # Z is inverted during plot generation for NED frame compatibility
 
-    # Plot faint path of the car
-    ax.plot(car_x_full, car_y_full, car_z_full, color='gray', linestyle='--', alpha=0.4, label='Car Trajectory')
+    # Plot the faint path of the entire helix
+    ax.plot(target_x_full, target_y_full, -target_z_full, color='gray', linestyle='--', alpha=0.4,
+            label='Target Trajectory')
 
-    # Init drawing elements
     line_traj, = ax.plot([], [], [], 'b', linewidth=2.5, label='Drone Flight Path')
     arm1, = ax.plot([], [], [], 'g', linewidth=3)
     arm2, = ax.plot([], [], [], 'g', linewidth=3)
     motor_pts = [ax.plot([], [], [], 'ko', markersize=6)[0] for _ in range(4)]
 
-    # Init Car from main.py
-    car_plot, = ax.plot([], [], [], color='red', linewidth=3, label='0.5x0.5m Car')
+    # Replace the car drawing with a simple red dot representing the target
+    target_plot, = ax.plot([], [], [], 'ro', markersize=8, label='Moving Target')
     ax.legend()
 
     trajectory = []
@@ -196,26 +230,47 @@ if __name__ == "__main__":
 
     # Simulation loop
     for i in range(N_sim):
+        curr_target_x = target_x_full[i]
+        curr_target_y = target_y_full[i]
+        curr_target_z = target_z_full[i]
 
-        # Current car position
-        curr_car_x = car_x_full[i]
-        curr_car_y = car_y_full[i]
-        curr_drone_z_target = z_ref_full[i]
-
-        # The drone ONLY knows the CURRENT position of the car.
-        # It uses this exact position across the entire prediction horizon.
+        # 1. GENERATE MPC HORIZON DYNAMICALLY
+        # Populate the MPC horizon with the actual future trajectory points
         for j in range(N):
+            idx = min(i + j, N_sim - 1)
             yref = np.zeros(16)
-            yref[0:3] = [curr_car_x, curr_car_y, curr_drone_z_target]
-            yref[8] = 0.0  # Optional heading (yaw) target
+            yref[0:3] = [target_x_full[idx], target_y_full[idx], target_z_full[idx]]
+
+            # Calculate Target Velocity for proper e_v tracking inside the MPC cost function
+            if idx == 0:
+                vx_ref, vy_ref, vz_ref = 0.0, 0.0, 0.0
+            else:
+                vx_ref = (target_x_full[idx] - target_x_full[idx - 1]) / dt
+                vy_ref = (target_y_full[idx] - target_y_full[idx - 1]) / dt
+                vz_ref = (target_z_full[idx] - target_z_full[idx - 1]) / dt
+
+            yref[3:6] = [vx_ref, vy_ref, vz_ref]
+            yref[8] = 0.0
             yref[12] = hover_thrust
             solver.set(j, "yref", yref)
 
+        # Terminal Node Evaluation
+        idx_e = min(i + N, N_sim - 1)
         yref_e = np.zeros(12)
-        yref_e[0:3] = [curr_car_x, curr_car_y, curr_drone_z_target]
-        yref_e[8] = 0.0
-        solver.set(N, "y_ref", yref_e)
+        yref_e[0:3] = [target_x_full[idx_e], target_y_full[idx_e], target_z_full[idx_e]]
 
+        if idx_e == 0:
+            vx_e, vy_e, vz_e = 0.0, 0.0, 0.0
+        else:
+            vx_e = (target_x_full[idx_e] - target_x_full[idx_e - 1]) / dt
+            vy_e = (target_y_full[idx_e] - target_y_full[idx_e - 1]) / dt
+            vz_e = (target_z_full[idx_e] - target_z_full[idx_e - 1]) / dt
+
+        yref_e[3:6] = [vx_e, vy_e, vz_e]
+        yref_e[8] = 0.0
+        solver.set(N, "yref", yref_e)
+
+        # 2. SOLVE LOW-LEVEL MPC
         solver.set(0, "lbx", x_current)
         solver.set(0, "ubx", x_current)
         solver.solve()
@@ -223,7 +278,7 @@ if __name__ == "__main__":
         u0 = solver.get(0, "u")
         u_history.append(u0)
 
-        # RK4 Integration for the drone
+        # RK4 Integration
         k1 = np.array(f_fun(x_current, u0)).flatten()
         k2 = np.array(f_fun(x_current + dt / 2 * k1, u0)).flatten()
         k3 = np.array(f_fun(x_current + dt / 2 * k2, u0)).flatten()
@@ -277,39 +332,17 @@ if __name__ == "__main__":
             motor_pts[k].set_3d_properties([-(Z + motors_world[2, k])])
 
         # -------------------------------------------------------------
-        # DRAW CAR (using rotation logic from main.py)
+        # DRAW MOVING TARGET
         # -------------------------------------------------------------
-        if i < len(car_x_full) - 1:
-            dx_car = car_x_full[i + 1] - car_x_full[i]
-            dy_car = car_y_full[i + 1] - car_y_full[i]
-        else:
-            dx_car = car_x_full[i] - car_x_full[i - 1]
-            dy_car = car_y_full[i] - car_y_full[i - 1]
-
-        car_theta = np.arctan2(dy_car, dx_car)
-        car_alpha = car_theta - (np.pi / 2)
-
-        h = 0.25
-        nose = 0.40
-        x_local = np.array([-h, h, h, 0, -h, -h])
-        y_local = np.array([-h, -h, h, nose, h, -h])
-
-        c_car, s_car = np.cos(car_alpha), np.sin(car_alpha)
-        x_rotated = x_local * c_car - y_local * s_car
-        y_rotated = x_local * s_car + y_local * c_car
-
-        plat_x = x_rotated + curr_car_x
-        plat_y = y_rotated + curr_car_y
-        plat_z = np.full_like(plat_x, 0.0)
-
-        car_plot.set_data(plat_x, plat_y)
-        car_plot.set_3d_properties(plat_z)
+        target_plot.set_data([curr_target_x], [curr_target_y])
+        target_plot.set_3d_properties([-curr_target_z])
 
         plt.draw()
         plt.pause(dt)
 
     plt.ioff()
-    plt.show()
+    # Close the 3D plot to allow the 2D performance plots to display
+    plt.close()
 
     # =============================================================================
     # PERFORMANCE ANALYSIS
@@ -317,16 +350,16 @@ if __name__ == "__main__":
     traj = np.array(trajectory)
     u_history = np.array(u_history)
 
-    # Calculate errors based on how well the drone tracked the car's position
-    ex = traj[:, 0] - car_x_full[:len(traj)]
-    ey = traj[:, 1] - car_y_full[:len(traj)]
+    # Calculate errors based on how well the drone tracked the target's position
+    ex = traj[:, 0] - target_x_full[:len(traj)]
+    ey = traj[:, 1] - target_y_full[:len(traj)]
     ez = traj[:, 2] - z_ref_full[:len(traj)]
     epsi = traj[:, 8] - psi_ref_full[:len(traj)]
 
     rms_pos = np.sqrt(np.mean(ex ** 2 + ey ** 2 + ez ** 2))
     rms_yaw = np.sqrt(np.mean(epsi ** 2))
 
-    print("RMS Position Error (Tracking Car):", rms_pos)
+    print("RMS Position Error (Tracking Helix Target):", rms_pos)
     print("RMS Yaw Error:", rms_yaw)
 
     plt.figure()
@@ -334,7 +367,7 @@ if __name__ == "__main__":
     plt.plot(t_full[:len(traj)], ey, label="Y error")
     plt.plot(t_full[:len(traj)], ez, label="Z error")
     plt.legend()
-    plt.title("Position Tracking Errors (Pursuing Car)")
+    plt.title("Position Tracking Errors (Pursuing Helix Target)")
     plt.grid()
 
     plt.figure()
